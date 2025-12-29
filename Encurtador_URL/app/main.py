@@ -1,137 +1,116 @@
-from fastapi import FastAPI, Request, Depends, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
+import string
+import random
 import geoip2.database
-import os
 
-from .database import SessionLocal, engine
-from .models import Base, URL, Click
-from .utils import generate_short_code, get_device
+from app.database import Base, engine, get_db
+from app.models import URL, Click
+from app.analytics import generate_country_chart
 
-# =========================
-# Inicialização
-# =========================
+app = FastAPI(title="URL Shortener")
 
-Base.metadata.create_all(bind=engine)
-
-app = FastAPI(
-    title="Encurtador de URL com Analytics",
-    version="1.0.0"
-)
+# Caminho para a base GeoIP
+GEOIP_DB_PATH = "./GeoLite2-Country.mmdb"
 
 # =========================
-# GeoIP
+# Startup
 # =========================
-
-GEOIP_DB_PATH = os.getenv(
-    "GEOIP_DB_PATH",
-    "GeoLite2-Country.mmdb"
-)
-
-geoip_reader = geoip2.database.Reader(GEOIP_DB_PATH)
+@app.on_event("startup")
+def on_startup():
+    """
+    Cria as tabelas quando a aplicação inicia.
+    """
+    Base.metadata.create_all(bind=engine)
 
 
 # =========================
-# Banco de dados
+# Schemas
 # =========================
+class URLCreate(BaseModel):
+    original_url: str
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+
+class URLResponse(BaseModel):
+    short_url: str
 
 
 # =========================
-# Rotas
+# Utils
 # =========================
+def generate_short_code(length: int = 6) -> str:
+    chars = string.ascii_letters + string.digits
+    return "".join(random.choice(chars) for _ in range(length))
 
-@app.post("/shorten")
-def shorten_url(original_url: str, db: Session = Depends(get_db)):
-    code = generate_short_code()
+
+# =========================
+# Routes
+# =========================
+@app.post("/shorten", response_model=URLResponse)
+def shorten_url(data: URLCreate, request: Request, db: Session = Depends(get_db)):
+    short_code = generate_short_code()
+
+    # Garante unicidade
+    while db.query(URL).filter(URL.short_code == short_code).first():
+        short_code = generate_short_code()
 
     url = URL(
-        original_url=original_url,
-        short_code=code
+        original_url=data.original_url,
+        short_code=short_code,
     )
 
     db.add(url)
     db.commit()
     db.refresh(url)
 
-    return {
-        "short_url": f"http://localhost:8000/{code}"
-    }
+    base_url = str(request.base_url).rstrip("/")
+
+    return {"short_url": f"{base_url}/{short_code}"}
 
 
-@app.get("/{code}")
-def redirect_to_original(
-    code: str,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    url = db.query(URL).filter(URL.short_code == code).first()
+# =========================
+# Analytics Route
+# =========================
+@app.get("/analytics")
+def analytics(db: Session = Depends(get_db)):
+    """
+    Gera gráfico de cliques por país com dados reais.
+    """
+    clicks = db.query(Click).all()
+    country_count = {}
 
+    with geoip2.database.Reader(GEOIP_DB_PATH) as reader:
+        for click in clicks:
+            try:
+                response = reader.country(click.ip)
+                country = response.country.iso_code or "Unknown"
+            except:
+                country = "Unknown"
+
+            country_count[country] = country_count.get(country, 0) + 1
+
+    buf = generate_country_chart(country_count)
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+# =========================
+# Redirecionamento de short URLs
+# =========================
+@app.get("/{short_code}")
+def redirect_url(short_code: str, request: Request, db: Session = Depends(get_db)):
+    url = db.query(URL).filter(URL.short_code == short_code).first()
     if not url:
-        raise HTTPException(
-            status_code=404,
-            detail="URL não encontrada"
-        )
+        raise HTTPException(status_code=404, detail="URL not found")
 
-    # =========================
-    # User-Agent → Dispositivo
-    # =========================
-    user_agent = request.headers.get("user-agent", "")
-    device = get_device(user_agent)
+    # Incrementa contador de cliques no URL
+    url.clicks += 1
+    db.commit()
 
-    # =========================
-    # IP → País (GeoIP REAL)
-    # =========================
-    ip_address = request.client.host
-
-    try:
-        response = geoip_reader.country(ip_address)
-        country = response.country.name or "Desconhecido"
-    except Exception:
-        country = "Desconhecido"
-
-    # =========================
-    # Registrar clique
-    # =========================
-    click = Click(
-        url_id=url.id,
-        country=country,
-        device=device
-    )
-
+    # Registra clique na tabela Click com IP do visitante
+    click = Click(url_id=url.id, ip=request.client.host)
     db.add(click)
     db.commit()
 
     return RedirectResponse(url.original_url)
-
-
-@app.get("/analytics/{code}")
-def get_analytics(code: str, db: Session = Depends(get_db)):
-    url = db.query(URL).filter(URL.short_code == code).first()
-
-    if not url:
-        raise HTTPException(
-            status_code=404,
-            detail="URL não encontrada"
-        )
-
-    countries = {}
-    devices = {}
-
-    for click in url.clicks:
-        countries[click.country] = countries.get(click.country, 0) + 1
-        devices[click.device] = devices.get(click.device, 0) + 1
-
-    return {
-        "short_code": code,
-        "original_url": url.original_url,
-        "total_clicks": len(url.clicks),
-        "countries": countries,
-        "devices": devices
-    }
