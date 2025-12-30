@@ -1,0 +1,23 @@
+Esse projeto é uma API para encurtar URL, desnvolvida em Python
+utilizando Fast API, com persistencia em PostgreSQL, totalmente dockerizada
+com suporte a analytics geograficos por meio de GeoIP
+
+Ela pega URLs e as encurta, permitindo rediceionamento automatico para a
+url original, registra os acessos e o pais desses acessos, podendo ser reprodusivel
+com docker
+
+utiliza um arquivo .env para configuração
+
+Para rodar basta:
+1. na raiz do projeto executar 
+    docker compose up --build
+
+2. baixar o ngrok
+    via bash com
+        sudo snap install ngrok
+    ou no site oficial
+3. expor a API
+    no terminal na raiz do projeto
+        ngrok http 8000
+4. o ngrok vai fornecer a url publica basta acessa-la
+    exemplo: https://abc123.ngrok-free.app/docs
