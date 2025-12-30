@@ -12,12 +12,9 @@ from app.analytics import generate_country_chart
 
 app = FastAPI(title="URL Shortener")
 
-# Caminho para a base GeoIP
 GEOIP_DB_PATH = "./GeoLite2-Country.mmdb"
 
-# =========================
-# Startup
-# =========================
+
 @app.on_event("startup")
 def on_startup():
     """
@@ -26,9 +23,6 @@ def on_startup():
     Base.metadata.create_all(bind=engine)
 
 
-# =========================
-# Schemas
-# =========================
 class URLCreate(BaseModel):
     original_url: str
 
@@ -37,22 +31,15 @@ class URLResponse(BaseModel):
     short_url: str
 
 
-# =========================
-# Utils
-# =========================
 def generate_short_code(length: int = 6) -> str:
     chars = string.ascii_letters + string.digits
     return "".join(random.choice(chars) for _ in range(length))
 
 
-# =========================
-# Routes
-# =========================
 @app.post("/shorten", response_model=URLResponse)
 def shorten_url(data: URLCreate, request: Request, db: Session = Depends(get_db)):
     short_code = generate_short_code()
 
-    # Garante unicidade
     while db.query(URL).filter(URL.short_code == short_code).first():
         short_code = generate_short_code()
 
@@ -70,9 +57,6 @@ def shorten_url(data: URLCreate, request: Request, db: Session = Depends(get_db)
     return {"short_url": f"{base_url}/{short_code}"}
 
 
-# =========================
-# Analytics Route
-# =========================
 @app.get("/analytics")
 def analytics(db: Session = Depends(get_db)):
     """
@@ -95,20 +79,15 @@ def analytics(db: Session = Depends(get_db)):
     return Response(content=buf.getvalue(), media_type="image/png")
 
 
-# =========================
-# Redirecionamento de short URLs
-# =========================
 @app.get("/{short_code}")
 def redirect_url(short_code: str, request: Request, db: Session = Depends(get_db)):
     url = db.query(URL).filter(URL.short_code == short_code).first()
     if not url:
         raise HTTPException(status_code=404, detail="URL not found")
 
-    # Incrementa contador de cliques no URL
     url.clicks += 1
     db.commit()
 
-    # Registra clique na tabela Click com IP do visitante
     click = Click(url_id=url.id, ip=request.client.host)
     db.add(click)
     db.commit()
